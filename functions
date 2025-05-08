@@ -1,0 +1,578 @@
+<?php
+// Add your custom functions here.
+// 
+// // Add product thumbnail to order details table in My Account
+add_filter( 'woocommerce_order_item_name', 'add_thumbnail_to_order_details_table', 20, 3 );
+function add_thumbnail_to_order_details_table( $item_name, $item, $is_visible ) {
+    // Target only the view order pages in My Account
+    if ( is_wc_endpoint_url( 'view-order' ) ) {
+        $product = $item->get_product(); // Get the WC_Product object
+        if ( $product && $product->get_image_id() > 0 ) {
+            $thumbnail = $product->get_image( array( 50, 50 ) ); // Get thumbnail (50x50 pixels)
+            $item_name = '<div class="item-thumbnail" style="float:left; margin-right:10px;">' . $thumbnail . '</div>' . $item_name;
+        }
+    }
+    return $item_name;
+}
+
+add_action( 'woocommerce_order_details_after_order_table', 'show_webinar_info_in_my_account' );
+
+function show_webinar_info_in_my_account( $order ) {
+    // Check if the product has webinar info (via Purchase Note or meta)
+    foreach ( $order->get_items() as $item_id => $item ) {
+        $product = $item->get_product();
+        if ( $product ) {
+            // Get the Purchase Note
+            $note = $product->get_purchase_note();
+            if ( $note ) {
+                echo '<h3>Webinar Information</h3>';
+                echo wpautop( wptexturize( $note ) );
+            }
+        }
+    }
+}
+
+
+function add_icon_script() {
+    // Make sure jQuery is loaded
+    wp_enqueue_script('jquery');
+    
+    // Enqueue your custom CSS file
+    wp_enqueue_style(
+        'nav-icon-style',
+        get_template_directory_uri() . '/css/nav-icon.css',
+        array(),
+        '1.0.0'
+    );
+    
+    // Add our custom script
+    wp_add_inline_script('jquery', '
+        jQuery(document).ready(function($) {
+            // Add SVG icon after the last menu item
+            if($("nav ul li").length > 0) {
+                $("nav ul li").last().find("a").append("<img src=\'https://academy.arcanalabs.ai/wp-content/uploads/2025/05/open-in-new-1.svg\' class=\'nav-external-icon\' alt=\'external link\'>");
+                console.log("SVG icon script executed");
+            }
+        });
+    ');
+}
+add_action('wp_enqueue_scripts', 'add_icon_script');
+
+
+
+// Custom Endpoint
+add_action('rest_api_init', function () {
+    // Endpoint para un solo curso
+    register_rest_route('custom/v1', '/courses/(?P<id>\d+)', [
+        'methods' => 'GET',
+        'callback' => function ($request) {
+            $course_id = $request['id'];
+            $course = get_post($course_id);
+
+            if (!$course || $course->post_type !== 'stm-courses') {
+                return new WP_Error('no_course', 'Course not found', ['status' => 404]);
+            }
+
+            $content = wp_kses_post($course->post_content);
+            $price = get_post_meta($course_id, 'price', true) ?: '739.97';
+            $instructor = '';
+            $instructor_photo = '';
+
+            $instructor_id = $course->post_author;
+            error_log('Course ID: ' . $course_id . ' | Instructor ID (post_author): ' . $instructor_id);
+
+            if ($instructor_id && is_numeric($instructor_id)) {
+                $user = get_userdata($instructor_id);
+                if ($user) {
+                    $instructor = $user->display_name;
+                    $instructor_photo_url = "https://arcana.pruebalucuma.site/wp-content/uploads/stm_lms_avatars/stm_lms_avatar{$instructor_id}.jpg";
+                    error_log('Instructor photo URL constructed: ' . $instructor_photo_url);
+
+                    $instructor_photo_id = get_attachment_id_from_url($instructor_photo_url);
+                    if ($instructor_photo_id) {
+                        $instructor_photo = $instructor_photo_id;
+                        error_log('Image ID found: ' . $instructor_photo);
+                    } else {
+                        $instructor_photo = $instructor_photo_url;
+                        error_log('No image ID found, using URL: ' . $instructor_photo_url);
+                    }
+                }
+            }
+
+            if (empty($instructor_photo)) {
+                if (preg_match('/class="masterstudy-single-course-instructor__avatar[^"]*".*?src=["\'](.*?)["\']/', $content, $match_photo)) {
+                    $instructor_photo = trim($match_photo[1]);
+                    error_log('Avatar extracted from HTML: ' . $instructor_photo);
+                }
+            }
+
+            if (empty($instructor) && !empty($content)) {
+                if (preg_match('/class="masterstudy-single-course-instructor__name[^"]*"\s*href="[^"]*"\s*[^>]*>(.*?)</s', $content, $match)) {
+                    $instructor = trim(strip_tags($match[1]));
+                }
+            }
+
+            $faqs = get_post_meta($course_id, 'faq', true);
+            $faq_items = [];
+            if (!empty($faqs)) {
+                $faqs = maybe_unserialize($faqs);
+                if (is_array($faqs)) {
+                    foreach ($faqs as $faq) {
+                        if (isset($faq['question']) && isset($faq['answer'])) {
+                            $faq_items[] = [
+                                'question' => esc_html($faq['question']),
+                                'answer' => esc_html($faq['answer']),
+                            ];
+                        }
+                    }
+                }
+            }
+
+            $categories = wp_get_post_terms($course_id, 'stm_lms_course_taxonomy', ['fields' => 'names']);
+
+            return apply_filters('arcana_course_sync_api_response', [
+                'id' => $course->ID,
+                'title' => $course->post_title,
+                'content' => $content,
+                'permalink' => get_permalink($course->ID),
+                'price' => $price,
+                'instructor' => $instructor,
+                'instructor_photo' => $instructor_photo,
+                'categories' => $categories,
+                'students' => get_post_meta($course_id, 'current_students', true) ?: '0',
+                'views' => get_post_meta($course_id, 'views', true) ?: '0',
+                'faqs' => $faq_items,
+            ], $course_id, $request);
+        },
+        'permission_callback' => '__return_true',
+    ]);
+
+    // Endpoint para todos los cursos con paginación
+    register_rest_route('custom/v1', '/courses/all', [
+        'methods' => 'GET',
+        'callback' => function ($request) {
+            $page = $request->get_param('page') ? (int) $request->get_param('page') : 1;
+            $per_page = 50;
+            $args = [
+                'post_type' => 'stm-courses',
+                'posts_per_page' => $per_page,
+                'paged' => $page,
+                'post_status' => 'publish',
+            ];
+            $courses = get_posts($args);
+
+            if (empty($courses)) {
+                return new WP_Error('no_courses', 'No courses found', ['status' => 404]);
+            }
+
+            $response = [];
+            foreach ($courses as $course) {
+                $single_request = new WP_REST_Request('GET', '/custom/v1/courses/' . $course->ID);
+                $single_request->set_param('id', $course->ID);
+                $single_response = rest_do_request($single_request);
+
+                if (!is_wp_error($single_response->data)) {
+                    $response[] = $single_response->data;
+                }
+            }
+
+            return $response;
+        },
+        'permission_callback' => '__return_true',
+    ]);
+});
+
+// Función para obtener el ID del attachment desde una URL
+function get_attachment_id_from_url($url) {
+    global $wpdb;
+    $attachment = $wpdb->get_col($wpdb->prepare("SELECT ID FROM $wpdb->posts WHERE guid='%s';", $url));
+    return !empty($attachment) ? $attachment[0] : false;
+}
+
+// Función para sincronizar todos los cursos
+function sync_all_courses() {
+    error_log('Starting sync_all_courses at ' . date('Y-m-d H:i:s'));
+    $page = 1;
+    $per_page = 50;
+    $all_courses = [];
+
+    // Aumentar timeout para la solicitud HTTP
+    $args = [
+        'timeout' => 30, // 30 segundos
+    ];
+
+    // Obtener todos los cursos con paginación
+    do {
+        error_log('Fetching courses page ' . $page);
+        $endpoint = 'https://academy.arcanalabs.ai/wp-json/custom/v1/courses/all?page=' . $page . '&per_page=' . $per_page;
+        $response = wp_remote_get($endpoint, $args);
+        if (is_wp_error($response)) {
+            error_log('Error fetching courses (page ' . $page . '): ' . $response->get_error_message());
+            return false;
+        }
+
+        $body = wp_remote_retrieve_body($response);
+        error_log('Raw endpoint response (page ' . $page . '): ' . substr($body, 0, 500)); // Log first 500 chars
+        $courses = json_decode($body, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            error_log('JSON decode error (page ' . $page . '): ' . json_last_error_msg());
+            return false;
+        }
+
+        if (isset($courses['error']) || !is_array($courses) || empty($courses)) {
+            error_log('No more courses or error on page ' . $page . ': ' . (isset($courses['error']) ? $courses['error'] : 'Empty or invalid response'));
+            break;
+        }
+
+        error_log('Courses fetched for page ' . $page . ': ' . count($courses));
+        $all_courses = array_merge($all_courses, $courses);
+        $page++;
+    } while (!empty($courses));
+
+    if (empty($all_courses)) {
+        error_log('No courses found to synchronize');
+        return false;
+    }
+
+    error_log('Total courses to process: ' . count($all_courses));
+    foreach ($all_courses as $course_data) {
+        error_log('Processing course ID ' . ($course_data['id'] ?? 'unknown'));
+        // Validar datos
+        if (!isset($course_data['id']) || !isset($course_data['title'])) {
+            error_log('Invalid data for course ID ' . ($course_data['id'] ?? 'unknown') . ': ' . json_encode($course_data));
+            continue;
+        }
+
+        // Verificar si el post type 'course' existe
+        if (!post_type_exists('course')) {
+            error_log('Error: Post type "course" does not exist');
+            return false;
+        }
+
+        // Buscar post de 'course' con el mismo course_id
+        $existing_courses = get_posts([
+            'post_type' => 'course',
+            'meta_query' => [
+                [
+                    'key' => 'course_id',
+                    'value' => $course_data['id'],
+                ],
+            ],
+            'posts_per_page' => -1,
+            'post_status' => 'any',
+        ]);
+
+        // Manejar duplicados
+        if (count($existing_courses) > 1) {
+            error_log('Duplicates found for course_id ' . $course_data['id'] . '. Keeping first, trashing others.');
+            $keep_post_id = $existing_courses[0]->ID;
+            for ($i = 1; $i < count($existing_courses); $i++) {
+                wp_trash_post($existing_courses[$i]->ID);
+            }
+        } else {
+            $keep_post_id = !empty($existing_courses) ? $existing_courses[0]->ID : null;
+        }
+
+        // Verificar si el título coincide
+        if ($keep_post_id) {
+            $existing_title = get_the_title($keep_post_id);
+            if ($existing_title !== $course_data['title']) {
+                error_log('Title mismatch for course_id ' . $course_data['id'] . '. Updating title to: ' . $course_data['title']);
+            }
+        }
+
+        // Datos del post
+        $post_data = [
+            'post_title' => $course_data['title'],
+            'post_content' => $course_data['content'] ?? '',
+            'post_type' => 'course',
+            'post_status' => 'publish',
+        ];
+
+        if ($keep_post_id) {
+            // Actualizar post existente
+            $post_data['ID'] = $keep_post_id;
+            $post_id = wp_update_post($post_data);
+            error_log('Updated course post ID ' . $post_id . ' for course_id ' . $course_data['id']);
+        } else {
+            // Crear nuevo post
+            $post_id = wp_insert_post($post_data);
+            error_log('Created new course post ID ' . $post_id . ' for course_id ' . $course_data['id']);
+        }
+
+        if (is_wp_error($post_id)) {
+            error_log('Error creating/updating course ID ' . $course_data['id'] . ': ' . $post_id->get_error_message());
+            continue;
+        }
+
+        // Verificar si ACF está activo
+        if (!function_exists('update_field')) {
+            error_log('Error: ACF plugin is not active or update_field is unavailable');
+            continue;
+        }
+
+        // Actualizar campos ACF con validación
+        $acf_fields = [
+            'course_id' => $course_data['id'],
+            'course_title' => $course_data['title'],
+            'course_content' => $course_data['content'] ?? '',
+            'course_permalink' => $course_data['permalink'] ?? '',
+            'course_price' => $course_data['price'] ?? '',
+            'course_instructor' => $course_data['instructor'] ?? '',
+            'course_instructor_photo' => $course_data['instructor_photo'] ?? '',
+            'course_categories' => implode(', ', $course_data['categories'] ?? []),
+            'course_students' => $course_data['students'] ?? '0',
+            'course_views' => $course_data['views'] ?? '0',
+        ];
+
+        foreach ($acf_fields as $field_key => $value) {
+            $result = update_field($field_key, $value, $post_id);
+            if ($result === false) {
+                error_log('Failed to update ACF field ' . $field_key . ' for post ID ' . $post_id);
+            } else {
+                error_log('Updated ACF field ' . $field_key . ' for post ID ' . $post_id);
+            }
+        }
+
+        if (!empty($course_data['faqs'])) {
+            $faqs = [];
+            foreach ($course_data['faqs'] as $faq) {
+                $faqs[] = [
+                    'question' => $faq['question'] ?? '',
+                    'answer' => $faq['answer'] ?? '',
+                ];
+            }
+            $result = update_field('course_faqs', $faqs, $post_id);
+            if ($result === false) {
+                error_log('Failed to update ACF field course_faqs for post ID ' . $post_id);
+            } else {
+                error_log('Updated FAQs for course ID ' . $course_data['id']);
+            }
+        } else {
+            $result = update_field('course_faqs', [], $post_id);
+            if ($result === false) {
+                error_log('Failed to update ACF field course_faqs (empty) for post ID ' . $post_id);
+            } else {
+                error_log('No FAQs for course ID ' . $course_data['id']);
+            }
+        }
+
+        error_log('Course synchronized: ID ' . $course_data['id'] . ', Post ID ' . $post_id);
+    }
+
+    error_log('Synchronization completed: ' . count($all_courses) . ' courses processed at ' . date('Y-m-d H:i:s'));
+    return true;
+}
+
+// Añadir botón en la pantalla de lista de 'course'
+add_action('admin_notices', function () {
+    global $pagenow, $post_type;
+    if ($pagenow === 'edit.php' && $post_type === 'course' && !isset($_GET['sync_courses'])) {
+        ?>
+        <div class="notice notice-info">
+            <p>
+                <a href="<?php echo admin_url('edit.php?post_type=course&sync_courses=1'); ?>" class="button button-primary" id="sync-courses-button">Sync All Courses</a>
+                <span id="sync-status" style="margin-left: 10px;"></span>
+            </p>
+        </div>
+        <script>
+            document.getElementById('sync-courses-button').addEventListener('click', function(e) {
+                e.preventDefault();
+                console.log('Sync All Courses button clicked');
+                const status = document.getElementById('sync-status');
+                status.innerText = 'Synchronizing...';
+                console.log('Starting synchronization...');
+                window.location.href = this.href;
+            });
+        </script>
+        <?php
+    }
+});
+
+// Procesar la sincronización
+add_action('admin_init', function () {
+    if (isset($_GET['post_type']) && $_GET['post_type'] === 'course' && isset($_GET['sync_courses']) && $_GET['sync_courses'] == 1) {
+        if (!current_user_can('manage_options')) {
+            error_log('Sync failed: User lacks manage_options permission');
+            wp_die('You do not have permission to perform this action.');
+        }
+
+        error_log('Sync All Courses triggered via admin button at ' . date('Y-m-d H:i:s'));
+        // Aumentar límite de tiempo para evitar timeouts
+        set_time_limit(300); // 5 minutos
+        $result = sync_all_courses();
+        error_log('Sync All Courses result: ' . ($result ? 'Success' : 'Failure'));
+
+        if ($result) {
+            error_log('Sync completed successfully');
+            add_action('admin_notices', function () {
+                ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>Courses synchronized successfully.</p>
+                </div>
+                <?php
+            });
+        } else {
+            error_log('Sync failed: Check previous logs for details');
+            add_action('admin_notices', function () {
+                ?>
+                <div class="notice notice-error is-dismissible">
+                    <p>Error synchronizing courses. Check the error log for details.</p>
+                </div>
+                <?php
+            });
+        }
+
+        wp_safe_redirect(admin_url('edit.php?post_type=course'));
+        exit;
+    }
+});
+
+// Programar cron job
+add_action('wp', function () {
+    if (!wp_next_scheduled('sync_courses_cron')) {
+        wp_schedule_event(time(), 'daily', 'sync_courses_cron');
+    }
+});
+
+// Ejecutar sincronización
+add_action('sync_courses_cron', function () {
+    error_log('Cron job sync_courses_cron triggered at ' . date('Y-m-d H:i:s'));
+    sync_all_courses();
+});
+
+// Opcional: Acción manual para probar el cron
+add_action('admin_init', function () {
+    if (isset($_GET['run_courses_cron']) && current_user_can('manage_options')) {
+        error_log('Manual cron test triggered at ' . date('Y-m-d H:i:s'));
+        sync_all_courses();
+        wp_safe_redirect(admin_url('edit.php?post_type=course'));
+        exit;
+    }
+});
+
+// Sincronizar un curso individual al actualizar
+function sync_single_course($post_id) {
+    if (get_post_type($post_id) !== 'stm-courses') {
+        return;
+    }
+
+    error_log('Starting sync_single_course for post ID ' . $post_id . ' at ' . date('Y-m-d H:i:s'));
+    $endpoint = 'https://academy.arcanalabs.ai/wp-json/custom/v1/courses/' . $post_id;
+    $response = wp_remote_get($endpoint, ['timeout' => 30]);
+    if (is_wp_error($response)) {
+        error_log('Error syncing course ID ' . $post_id . ': ' . $response->get_error_message());
+        return;
+    }
+
+    $course_data = json_decode(wp_remote_retrieve_body($response), true);
+    if (isset($course_data['error'])) {
+        error_log('Endpoint error for course ID ' . $post_id . ': ' . $course_data['message']);
+        return;
+    }
+
+    $existing_courses = get_posts([
+        'post_type' => 'course',
+        'meta_query' => [
+            [
+                'key' => 'course_id',
+                'value' => $course_data['id'],
+            ],
+        ],
+        'posts_per_page' => -1,
+        'post_status' => 'any',
+    ]);
+
+    if (count($existing_courses) > 1) {
+        error_log('Duplicates found for course_id ' . $course_data['id'] . '. Keeping first, trashing others.');
+        $keep_post_id = $existing_courses[0]->ID;
+        for ($i = 1; $i < count($existing_courses); $i++) {
+            wp_trash_post($existing_courses[$i]->ID);
+        }
+    } else {
+        $keep_post_id = !empty($existing_courses) ? $existing_courses[0]->ID : null;
+    }
+
+    if ($keep_post_id) {
+        $existing_title = get_the_title($keep_post_id);
+        if ($existing_title !== $course_data['title']) {
+            error_log('Title mismatch for course_id ' . $course_data['id'] . '. Updating title to: ' . $course_data['title']);
+        }
+    }
+
+    $post_data = [
+        'post_title' => $course_data['title'],
+        'post_content' => $course_data['content'] ?? '',
+        'post_type' => 'course',
+        'post_status' => 'publish',
+    ];
+
+    if ($keep_post_id) {
+        $post_data['ID'] = $keep_post_id;
+        $new_post_id = wp_update_post($post_data);
+        error_log('Updated course post ID ' . $new_post_id . ' for course_id ' . $course_data['id']);
+    } else {
+        $new_post_id = wp_insert_post($post_data);
+        error_log('Created new course post ID ' . $new_post_id . ' for course_id ' . $course_data['id']);
+    }
+
+    if (is_wp_error($new_post_id)) {
+        error_log('Error creating/updating course ID ' . $course_data['id'] . ': ' . $new_post_id->get_error_message());
+        return;
+    }
+
+    if (!function_exists('update_field')) {
+        error_log('Error: ACF plugin is not active or update_field is unavailable');
+        return;
+    }
+
+    $acf_fields = [
+        'course_id' => $course_data['id'],
+        'course_title' => $course_data['title'],
+        'course_content' => $course_data['content'] ?? '',
+        'course_permalink' => $course_data['permalink'] ?? '',
+        'course_price' => $course_data['price'] ?? '',
+        'course_instructor' => $course_data['instructor'] ?? '',
+        'course_instructor_photo' => $course_data['instructor_photo'] ?? '',
+        'course_categories' => implode(', ', $course_data['categories'] ?? []),
+        'course_students' => $course_data['students'] ?? '0',
+        'course_views' => $course_data['views'] ?? '0',
+    ];
+
+    foreach ($acf_fields as $field_key => $value) {
+        $result = update_field($field_key, $value, $new_post_id);
+        if ($result === false) {
+            error_log('Failed to update ACF field ' . $field_key . ' for post ID ' . $new_post_id);
+        } else {
+            error_log('Updated ACF field ' . $field_key . ' for post ID ' . $new_post_id);
+        }
+    }
+
+    if (!empty($course_data['faqs'])) {
+        $faqs = [];
+        foreach ($course_data['faqs'] as $faq) {
+            $faqs[] = [
+                'question' => $faq['question'] ?? '',
+                'answer' => $faq['answer'] ?? '',
+            ];
+        }
+        $result = update_field('course_faqs', $faqs, $new_post_id);
+        if ($result === false) {
+            error_log('Failed to update ACF field course_faqs for post ID ' . $new_post_id);
+        } else {
+            error_log('Updated FAQs for course ID ' . $course_data['id']);
+        }
+    } else {
+        $result = update_field('course_faqs', [], $new_post_id);
+        if ($result === false) {
+            error_log('Failed to update ACF field course_faqs (empty) for post ID ' . $new_post_id);
+        } else {
+            error_log('No FAQs for course ID ' . $course_data['id']);
+        }
+    }
+
+    error_log('Course synchronized: ID ' . $course_data['id'] . ' at ' . date('Y-m-d H:i:s'));
+}
+
+add_action('save_post_stm-courses', 'sync_single_course', 20);
+?>
